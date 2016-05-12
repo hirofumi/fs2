@@ -30,14 +30,21 @@ object concurrent {
 
     case class State(outerDone: Boolean, open: Int, killed: Boolean)
 
-    def throttle[A](stateSignal: async.mutable.Signal[F,State]): Pipe[F,Stream[F,A],Stream[F,A]] = {
+    def throttle[A](stateSignal: async.mutable.Signal[F,State], killLock: async.mutable.Semaphore[F]): Pipe[F,Stream[F,A],Stream[F,A]] = {
       def go(open: Int): (Stream.Handle[F,State], Stream.Handle[F,Stream[F,A]]) => Pull[F,Stream[F,A],Unit] = (state, s) => {
           if (open < maxOpen) {
             s.receive1 { case inner #: s =>
               val monitoredStream = {
-                Stream.bracket(stateSignal.possiblyModify { s => Some(s.copy(open = s.open + 1)) })(
-                  _ => inner,
-                  _ => F.map(stateSignal.possiblyModify { s => Some(s.copy(open = s.open - 1)) }) { _ => () }
+                val checkIfKilled: F[Boolean] = {
+                  F.bind(killLock.decrement) { _ =>
+                  F.bind(stateSignal.get) { state =>
+                  F.map(killLock.increment) { _ =>
+                    state.killed
+                  }}}
+                }
+                Stream.bracket(stateSignal.possiblyModify { st => Some(st.copy(open = st.open + 1)) })(
+                  _ => Stream.eval(checkIfKilled).flatMap { killed => if (killed) Stream.empty else inner },
+                  _ => F.map(stateSignal.possiblyModify { st => Some(st.copy(open = st.open - 1)) }) { _ => () }
                 )
               }
               Pull.output1(monitoredStream) >> go(open + 1)(state, s)
@@ -46,17 +53,18 @@ object concurrent {
             state.receive1 { case now #: state => go(now.open)(state, s) }
           }
         }
-      s => stateSignal.discrete.pull2(s)(go(0))
+      s => stateSignal.continuous.pull2(s)(go(0))
     }
 
     for {
       stateSignal <- Stream.eval(async.signalOf(State(false, 0, false)))
+      killLock <- Stream.eval(async.mutable.Semaphore(1))
       outputQueue <- Stream.eval(async.mutable.Queue.synchronousNoneTerminated[F,Either[Throwable,Chunk[O]]])
       o <- outer.map { inner =>
         inner.chunks.attempt.evalMap { o =>
           outputQueue.enqueue1(Some(o))
         }.interruptWhen(stateSignal.map { _.killed })
-      }.through(throttle(stateSignal)).evalMap { inner =>
+      }.through(throttle(stateSignal, killLock)).evalMap { inner =>
         F.start(inner.run.run)
       }.onFinalize {
         F.map(stateSignal.possiblyModify { s => Some(s.copy(outerDone = true)) }) { _ => () }
@@ -70,9 +78,11 @@ object concurrent {
           case Right(c) => Stream.chunk(c)
         }
       }.onFinalize {
+        F.bind(killLock.decrement) { _ =>
         F.bind(stateSignal.possiblyModify(s => if (s.killed) None else Some(s.copy(killed = true)))) { _ =>
+        F.bind(killLock.increment) { _ =>
           stateSignal.discrete.takeWhile { s => s.open > 0 }.run.run
-        }
+        }}}
       }
     } yield o
   }

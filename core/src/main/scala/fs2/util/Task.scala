@@ -361,7 +361,7 @@ object Task extends Instances {
       Task.unforkedAsync[(A,Long)] { cb => actor ! Msg.Read(cb, msg) }
 
     /** Return the most recently completed `set`, or block until a `set` value is available. */
-    def get: Task[A] = getStamped(new MsgId {}).map(_._1)
+    def get: Task[A] = Task.delay(new MsgId {}).flatMap { mid => getStamped(mid).map(_._1) }
 
     /** Like `get`, but returns a `Task[Unit]` that can be used cancel the subscription. */
     def cancellableGet: Task[(Task[A], Task[Unit])] = Task.delay {

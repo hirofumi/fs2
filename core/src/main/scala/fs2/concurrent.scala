@@ -33,13 +33,16 @@ object concurrent {
       def runInnerStream(inner: Stream[F,A], onInnerStreamDone: F[Unit]): Pull[F,Nothing,Unit] = {
         val startInnerStream: F[(F.Ref[Unit], F[Unit])] = {
           F.bind(F.ref[Unit]) { gate =>
-          F.map(F.start((Stream.eval_(F.suspend(println("RUNNING INNER TASK"))) ++ Stream.eval(checkIfKilled)).
+          F.map(F.start(
+            F.bind(F.suspend(println("F.start of inner stream running"))) { _ =>
+              (Stream.eval_(F.suspend(println(" -- Start of inner task stream"))) ++ Stream.eval(checkIfKilled)).
                            flatMap { killed =>
-                             println("Inner stream running; killed = " + killed)
+                             println("  -- Inner stream running; killed = " + killed)
                              if (killed) Stream.empty else inner
                            }.
                            onFinalize { F.bind(F.suspend(println(" - Finalizing inner stream"))) { _ => F.bind(F.setPure(gate)(())) { _ => println(" - Set gate"); onInnerStreamDone } } }.
                            run.run
+                         }
           )) { t => gate -> t }}
         }
         Pull.acquire(startInnerStream) { case (gate, t) => println("Blocking on gate..."); F.map(F.get(gate)) { _ => println("...done blocking on gate"); () } }.map { _ => () }

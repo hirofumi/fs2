@@ -338,10 +338,12 @@ object Task extends Instances {
   class Ref[A] private[fs2](actor: Actor[Msg[A]]) {
 
     def access: Task[(A, Either[Throwable,A] => Task[Boolean])] =
-      getStamped(new MsgId {}).map { case (a, id) =>
-        val set = (a: Either[Throwable,A]) =>
-          Task.unforkedAsync[Boolean] { cb => actor ! Msg.TrySet(id, a, cb) }
-        (a, set)
+      Task.delay(new MsgId {}).flatMap { mid =>
+        getStamped(mid).map { case (a, id) =>
+          val set = (a: Either[Throwable,A]) =>
+            Task.unforkedAsync[Boolean] { cb => actor ! Msg.TrySet(id, a, cb) }
+          (a, set)
+        }
       }
 
     /**

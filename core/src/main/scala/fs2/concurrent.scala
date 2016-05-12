@@ -53,7 +53,7 @@ object concurrent {
             state.receive1 { case now #: state => go(now.open)(state, s) }
           }
         }
-      s => stateSignal.continuous.pull2(s)(go(0))
+      s => stateSignal.discrete.pull2(s)(go(0))
     }
 
     for {
